@@ -20,6 +20,13 @@
  * Copyright (C) 2001-2017 Alexandre Cassen, <acassen@gmail.com>
  */
 
+/* To monitor netlink messages and decode them:
+ *   ip link add nlmon0 type nlmon
+ *   ip link set nlmon0 up
+ *   tcpdump -i nlmon0 -w OP_FILE
+ *   wireshare OP_FILE
+ */
+
 #include "config.h"
 
 /* global include */
@@ -74,6 +81,7 @@
 #include "vrrp_ipaddress.h"
 #include "global_data.h"
 #include "align.h"
+#include "warnings.h"
 
 /* This seems a nasty hack, but it's what iproute2 does */
 #ifndef SOL_NETLINK
@@ -664,7 +672,11 @@ netlink_close(nl_handle_t *nl)
 }
 
 /* iproute2 utility function */
-int
+/* GCC, at least up to v11.1.1, ignores the RELAX_STRINGOP_OVERFLOW below,
+ * and produces warnings when doing the LTO link of vrrp_vmac.o and vrrp_ipaddress.o.
+ * This should be tested periodically to see if specifying noinline can be removed.
+ */
+int LTO_NOINLINE
 addattr_l(struct nlmsghdr *n, size_t maxlen, unsigned short type, const void *data, size_t alen)
 {
 	size_t len = RTA_LENGTH(alen);
@@ -677,7 +689,9 @@ addattr_l(struct nlmsghdr *n, size_t maxlen, unsigned short type, const void *da
 	rta = PTR_CAST(struct rtattr, (((char *)n) + n->nlmsg_len));
 	rta->rta_type = type;
 	rta->rta_len = (unsigned short)len;
+RELAX_STRINGOP_OVERFLOW
 	memcpy(RTA_DATA(rta), data, alen);
+RELAX_END
 	n->nlmsg_len += (uint32_t)align_len;
 
 	return 0;
@@ -826,8 +840,8 @@ set_vrrp_backup(vrrp_t *vrrp)
 }
 
 /* Check if we already have the address on the interface */
-static bool
-have_address(void *addr_p, const interface_t *ifp, int family)
+static bool __attribute__((pure))
+have_address(const void *addr_p, const interface_t *ifp, int family)
 {
 	sin_addr_t *addr;
 	const list_head_t *addr_l;
@@ -1334,7 +1348,8 @@ netlink_parse_info(int (*filter) (struct sockaddr_nl *, struct nlmsghdr *),
 			}
 
 #ifdef _WITH_VRRP_
-			/* Skip unsolicited messages from cmd channel */
+			/* Skip messages on the kernel reflection channel
+			 * caused by commands from our cmd channel */
 			if (
 #ifndef _ONE_PROCESS_DEBUG_
 			    prog_type == PROG_TYPE_VRRP &&
@@ -1342,6 +1357,7 @@ netlink_parse_info(int (*filter) (struct sockaddr_nl *, struct nlmsghdr *),
 			    h->nlmsg_type != RTM_NEWLINK &&
 			    h->nlmsg_type != RTM_DELLINK &&
 			    h->nlmsg_type != RTM_NEWROUTE &&
+// Allow NEWADDR/DELADDR for ipvlans
 			    nl != &nl_cmd && h->nlmsg_pid == nl_cmd.nl_pid)
 				continue;
 #endif
@@ -1480,6 +1496,8 @@ netlink_request(nl_handle_t *nl,
 #endif
 		req.nlh.nlmsg_flags |= NLM_F_DUMP;
 #if HAVE_DECL_RTEXT_FILTER_SKIP_STATS
+	/* The following produces a -Wstringop-overflow warning due to writing
+	 * 4 bytes into a region of size 0. This is, however, safe. */
 	addattr32(&req.nlh, sizeof req, IFLA_EXT_MASK, RTEXT_FILTER_SKIP_STATS);
 #endif
 
@@ -1761,8 +1779,12 @@ netlink_if_link_populate(interface_t *ifp, struct rtattr *tb[], struct ifinfomsg
 					if (ifp->if_type == IF_TYPE_MACVLAN)
 						ifp->vmac_type = *PTR_CAST(uint32_t, RTA_DATA(linkattr[IFLA_MACVLAN_MODE]));
 #ifdef _HAVE_VRRP_IPVLAN_
-					else
+					else {
 						ifp->vmac_type = *PTR_CAST(uint32_t, RTA_DATA(linkattr[IFLA_IPVLAN_MODE]));
+#if HAVE_DECL_IFLA_IPVLAN_FLAGS
+						ifp->ipvlan_flags = *PTR_CAST(uint32_t, RTA_DATA(linkattr[IFLA_IPVLAN_FLAGS]));
+#endif
+					}
 #endif
 					ifp->base_ifindex = *PTR_CAST(uint32_t, RTA_DATA(tb[IFLA_LINK]));
 #ifdef HAVE_IFLA_LINK_NETNSID						/* from Linux v4.0 */
@@ -2321,7 +2343,7 @@ kernel_netlink(thread_ref_t thread)
 	if (thread->type != THREAD_READ_TIMEOUT)
 		netlink_parse_info(netlink_broadcast_filter, nl, NULL, true);
 	nl->thread = thread_add_read(master, kernel_netlink, nl, nl->fd,
-				      TIMER_NEVER, false);
+				      TIMER_NEVER, 0);
 }
 
 #ifdef _WITH_VRRP_
@@ -2393,7 +2415,7 @@ kernel_netlink_init(void)
 	/* If the netlink kernel fd is already open, just register a read thread.
 	 * This will happen at reload. */
 	if (nl_kernel.fd >= 0) {
-		nl_kernel.thread = thread_add_read(master, kernel_netlink, &nl_kernel, nl_kernel.fd, TIMER_NEVER, false);
+		nl_kernel.thread = thread_add_read(master, kernel_netlink, &nl_kernel, nl_kernel.fd, TIMER_NEVER, 0);
 		return;
 	}
 
@@ -2422,7 +2444,7 @@ kernel_netlink_init(void)
 		if (__test_bit(LOG_DETAIL_BIT, &debug))
 			log_message(LOG_INFO, "Registering Kernel netlink reflector");
 		nl_kernel.thread = thread_add_read(master, kernel_netlink, &nl_kernel, nl_kernel.fd,
-						   TIMER_NEVER, false);
+						   TIMER_NEVER, 0);
 	} else
 		log_message(LOG_INFO, "Error while registering Kernel netlink reflector channel");
 

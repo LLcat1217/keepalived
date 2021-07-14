@@ -36,6 +36,7 @@
 #include <string.h>
 
 #include "vector.h"
+#include "warnings.h"
 
 #define STR(x)  #x
 
@@ -43,6 +44,10 @@
 #define COPYRIGHT_STRING	"Copyright(C) 2001-" GIT_YEAR " Alexandre Cassen, <acassen@gmail.com>"
 
 #define max(a,b) ((a) >= (b) ? (a) : (b))
+
+/* Evaluates to -1, 0 or 1 as appropriate.
+ * Avoids a - b <= 0 producing "warning: assuming signed overflow does not occur when simplifying ‘X - Y <= 0’ to ‘X <= Y’ [-Wstrict-overflow]" */
+#define less_equal_greater_than(a,b)	({ typeof(a) _a = (a); typeof(b) _b = (b); (_a) < (_b) ? -1 : (_a) == (_b) ? 0 : 1; })
 
 #if defined RUN_DIR_ROOT
 #define RUN_DIR			RUN_DIR_ROOT "/run/"
@@ -218,9 +223,22 @@ static inline uint16_t csum_incremental_update16(const uint16_t old_csum, const 
 	return ~acc & 0xffff;
 }
 
-/* The following definition produces some warnings: (dst[0] = '\0', strncat(dst, src, sizeof(dst) - 1)) */
-#define strcpy_safe(dst, src) \
-	do { strncpy(dst, src, sizeof(dst) - 1); dst[sizeof(dst) - 1] = '\0'; } while (0)
+/* The following produce -Wstringop-truncation warnings (not produced without the loop):
+ * 	do { strncpy(dst, src, sizeof(dst) - 1); dst[sizeof(dst) - 1] = '\0'; } while (0)
+	do { dst[0] = '\0'; strncat(dst, src, sizeof(dst) - 1); } while (0)
+   even if surrounded by RELAX_STRINGOP_TRUNCATION/RELAX_END
+   See GCC BZ#101451
+ */
+#define strcpy_safe(dst, src)	strcpy_safe_impl(dst, src, sizeof(dst))
+
+static inline char *
+strcpy_safe_impl(char *dst, const char *src, size_t len)
+{
+	dst[0] = '\0';
+RELAX_STRINGOP_TRUNCATION
+	return strncat(dst, src, len - 1);
+RELAX_END
+}
 
 /* global vars exported */
 extern unsigned long debug;
@@ -264,7 +282,7 @@ extern void format_mac_buf(char *, size_t, const unsigned char *, size_t);
 extern const char *get_local_name(void) __attribute__((malloc));
 extern bool string_equal(const char *, const char *) __attribute__ ((pure));
 extern int integer_to_string(const int, char *, size_t);
-extern FILE *fopen_safe(const char *, const char *);
+extern FILE *fopen_safe(const char *, const char *) __attribute__((malloc));
 extern void set_std_fd(bool);
 extern void close_std_fd(void);
 #if defined _WITH_VRRP_ || defined _WITH_BFD_
